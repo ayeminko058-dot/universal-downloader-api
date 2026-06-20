@@ -1,65 +1,88 @@
-const express = require('express');
-const cors = require('cors');
-const { exec } = require('yt-dlp-exec');
-const fbDownloader = require('fb-downloader-scrapper');
+const axios = require('axios');
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+module.exports = async (req, res) => {
+    // Frontend (AI Studio) ကနေ လှမ်းခေါ်ရင် CORS block မဖြစ်အောင် တံခါးဖွင့်ပေးခြင်း
+    res.setHeader('Access-Control-Allow-Credentials', true);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
+    res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
 
-// API အလုပ်လုပ်၊ မလုပ် စမ်းသပ်ရန်
-app.get('/', (req, res) => res.send('Universal Downloader API is Running!'));
+    if (req.method === 'OPTIONS') {
+        res.status(200).end();
+        return;
+    }
 
-// AI Studio UI ကနေ Link ပို့ရင် ဒီလမ်းကြောင်းထဲကို ရောက်လာပါမယ်
-app.post('/api/download', async (req, res) => {
+    // GET Request စမ်းသပ်ရန်
+    if (req.method === 'GET') {
+        return res.status(200).send('Universal Downloader API is Running Smoothly!');
+    }
+
+    if (req.method !== 'POST') {
+        return res.status(405).json({ error: 'Method Not Allowed' });
+    }
+
     const { url } = req.body;
-    
     if (!url) {
         return res.status(400).json({ error: 'ကျေးဇူးပြု၍ ဗီဒီယို Link ထည့်ပေးပါ' });
     }
 
     try {
-        // ၁။ Facebook ဗီဒီယို ဖြစ်ခဲ့လျှင်
-        if (url.includes('facebook.com') || url.includes('fb.watch')) {
-            const fbData = await fbDownloader(url);
-            return res.json({
-                title: "Facebook Video",
-                preview_url: fbData.hd || fbData.sd,
-                formats: [
-                    { quality: "HD Quality (MP4)", url: fbData.hd, size: "Auto Size" },
-                    { quality: "SD Quality (MP4)", url: fbData.sd, size: "Auto Size" }
-                ]
-            });
-        }
-
-        // ၂။ YouTube သို့မဟုတ် TikTok သို့မဟုတ် အခြား Link များ ဖြစ်ခဲ့လျှင်
-        const output = await exec(url, {
-            dumpSingleJson: true,
-            noWarnings: true,
-            preferFreeFormats: true,
+        // သုံးစွဲသူပေးလိုက်သော Link ၏ HTML Source တစ်ခုလုံးကို ဆာဗာနောက်ကွယ်ကနေ လှမ်းဆွဲယူခြင်း
+        const response = await axios.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9'
+            },
+            timeout: 10000
         });
 
-        const videoData = JSON.parse(output);
-        
-        // အသံရော ရုပ်ပါပါတဲ့ ဗီဒီယို Format တွေကိုပဲ ရွေးထုတ်ခြင်း
-        const formats = videoData.formats
-            .filter(f => f.vcodec !== 'none' && f.acodec !== 'none')
-            .map(f => ({
-                quality: `${f.height ? f.height + 'p' : 'HQ'} (${f.ext.toUpperCase()})`,
-                url: f.url,
-                size: f.filesize ? `${(f.filesize / (1024 * 1024)).toFixed(1)} MB` : "Auto Size"
-            }));
+        const html = response.data;
+        let videoUrl = '';
 
-        return res.json({
-            title: videoData.title || "Parsed Video",
-            preview_url: videoData.thumbnail || videoData.url,
-            formats: formats.slice(0, 4) // အကောင်းဆုံး Format ၄ ခုပဲ ယူပြမယ်
+        // နည်းလမ်း (၁) - Open Graph Meta Tags များထဲမှ ဗီဒီယိုလင့်ခ်ကို Regex ဖြင့် လိုက်ရှာခြင်း (TikTok, FB, Insta အကုန်ရသည်)
+        const ogVideoRegex = /<meta\s+property=["']og:video["']\s+content=["']([^"']+)["']/i;
+        const ogVideoSecureRegex = /<meta\s+property=["']og:video:secure_url["']\s+content=["']([^"']+)["']/i;
+        const twitterVideoRegex = /<meta\s+name=["']twitter:player:stream["']\s+content=["']([^"']+)["']/i;
+
+        let match = html.match(ogVideoRegex) || html.match(ogVideoSecureRegex) || html.match(twitterVideoRegex);
+
+        if (match && match[1]) {
+            videoUrl = match[1].replace(/&amp;/g, '&'); // လင့်ခ်ထဲက ကုဒ်အဆန်းများကို ဖယ်ရှားခြင်း
+        }
+
+        // နည်းလမ်း (၂) - မတွေ့သေးလျှင် ကုန်ကြမ်း HTML video tag ထဲက ထပ်ရှာခြင်း
+        if (!videoUrl) {
+            const videoTagRegex = /<video[^>]*src=["']([^"']+)["']/i;
+            let videoMatch = html.match(videoTagRegex);
+            if (videoMatch && videoMatch[1]) {
+                videoUrl = videoMatch[1].replace(/&amp;/g, '&');
+            }
+        }
+
+        // နည်းလမ်း (၃) - TikTok အတွက် သီးသန့် အပိုဆောင်း ထပ်ရှာပေးခြင်း
+        if (!videoUrl && url.includes('tiktok.com')) {
+            const ttRegex = /"downloadAddr"\s*:\s*["']([^"']+)["']/i;
+            let ttMatch = html.match(ttRegex);
+            if (ttMatch && ttMatch[1]) {
+                videoUrl = JSON.parse(`"${ttMatch[1]}"`); // escape character များကို ရှင်းထုတ်ခြင်း
+            }
+        }
+
+        // ဗီဒီယိုလင့်ခ် လုံးဝ ရှာမတွေ့ခဲ့လျှင်
+        if (!videoUrl) {
+            return res.status(404).json({ error: 'ဗီဒီယိုဖိုင်ကို ရှာမတွေ့ပါ။ လင့်ခ်အမှန် ပြန်စမ်းပေးပါဗျာ။' });
+        }
+
+        // AI Studio Frontend UI ဘက်က မျှော်လင့်ထားတဲ့ Object ပုံစံအတိုင်း ကွက်တိ ပြန်ထုတ်ပေးခြင်း
+        return res.status(200).json({
+            title: url.includes('tiktok.com') ? "TikTok Video Stream" : url.includes('facebook.com') ? "Facebook Video Stream" : "Universal Video Stream",
+            preview_url: videoUrl,
+            formats: [
+                { quality: "HD No-Watermark (MP4)", size: "Auto Size", url: videoUrl }
+            ]
         });
 
     } catch (error) {
-        console.error(error);
-        return res.status(500).json({ error: 'ဗီဒီယိုကို ဖတ်လို့မရပါသဖြင့် Link မှန်မမှန် ပြန်စစ်ပေးပါ' });
+        return res.status(500).json({ error: 'ဗီဒီယိုဖတ်ရယူခြင်း မအောင်မြင်ပါ- ' + error.message });
     }
-});
-
-module.exports = app;
+};
